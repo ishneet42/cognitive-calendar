@@ -172,7 +172,7 @@ async function synthesizeVoice(text) {
       },
       body: JSON.stringify({
         text,
-        model_id: "eleven_monolingual_v1",
+        model_id: "eleven_multilingual_v2",
         voice_settings: {
           stability: 0.5,
           similarity_boost: 0.75,
@@ -182,7 +182,13 @@ async function synthesizeVoice(text) {
   );
 
   if (!response.ok) {
-    return { status: "error", reason: "ElevenLabs request failed." };
+    const errorText = await response.text();
+    console.error("ElevenLabs error:", response.status, errorText);
+    return {
+      status: "error",
+      reason: `ElevenLabs request failed (${response.status}).`,
+      details: errorText,
+    };
   }
 
   const arrayBuffer = await response.arrayBuffer();

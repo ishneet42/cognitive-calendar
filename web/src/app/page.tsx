@@ -61,6 +61,7 @@ export default function Home() {
   const [selectedEvent, setSelectedEvent] = useState<EventLoad | null>(null);
   const [voiceQuery, setVoiceQuery] = useState("");
   const [voiceResponse, setVoiceResponse] = useState("");
+  const [voiceError, setVoiceError] = useState("");
   const [voiceStatus, setVoiceStatus] = useState<"idle" | "loading">("idle");
   const [eventSource, setEventSource] = useState<"mock" | "google">("mock");
   const [calendarOptions, setCalendarOptions] = useState<
@@ -259,20 +260,33 @@ export default function Home() {
     if (!query) return;
 
     setVoiceStatus("loading");
-    const response = await fetch(`${API_BASE}/api/voice/query`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, summary }),
-    });
-    const data = await response.json();
-    setVoiceResponse(data.text || "");
+    setVoiceError("");
+    try {
+      const response = await fetch(`${API_BASE}/api/voice/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, summary }),
+      });
+      const data = await response.json();
+      setVoiceResponse(data.text || "");
 
-    if (data.audio?.status === "ok") {
-      const audio = new Audio(`data:audio/mpeg;base64,${data.audio.audioBase64}`);
-      audio.play();
+      if (!response.ok) {
+        setVoiceError(data.error || "Voice request failed.");
+        return;
+      }
+
+      if (data.audio?.status === "ok") {
+        const audio = new Audio(`data:audio/mpeg;base64,${data.audio.audioBase64}`);
+        audio.play();
+      } else if (data.audio?.status) {
+        setVoiceError(data.audio.reason || "Voice audio unavailable.");
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Voice request failed.";
+      setVoiceError(message);
+    } finally {
+      setVoiceStatus("idle");
     }
-
-    setVoiceStatus("idle");
   };
 
   return (
@@ -616,6 +630,11 @@ export default function Home() {
             {voiceResponse && (
               <div className="mt-4 rounded-2xl bg-white/5 px-4 py-3 text-sm text-slate-300">
                 {voiceResponse}
+              </div>
+            )}
+            {voiceError && (
+              <div className="mt-4 rounded-2xl border border-rose-400/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+                {voiceError}
               </div>
             )}
           </aside>

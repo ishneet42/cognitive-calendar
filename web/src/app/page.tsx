@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import dayGridPlugin from "@fullcalendar/daygrid";
@@ -72,6 +72,8 @@ export default function Home() {
   const [selectedDayIndex, setSelectedDayIndex] = useState<number>(0);
   const [filter, setFilter] = useState<"all" | "events" | "meetings">("all");
   const [assistantActive, setAssistantActive] = useState(false);
+  const [calendarTitle, setCalendarTitle] = useState<string>(formatMonthYear());
+  const calendarRef = useRef<FullCalendar | null>(null);
 
   useEffect(() => {
     const fetchEvents = async (source: "mock" | "google") => {
@@ -302,6 +304,35 @@ export default function Home() {
     }
   };
 
+  const handleVoiceCapture = () => {
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setVoiceResponse("Speech recognition is not supported in this browser.");
+      return;
+    }
+
+    setAssistantActive(true);
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setVoiceQuery(transcript);
+      runVoiceQuery(transcript);
+      setAssistantActive(false);
+    };
+
+    recognition.onerror = () => {
+      setAssistantActive(false);
+    };
+
+    recognition.start();
+  };
+
   return (
     <div className="min-h-screen bg-[#0b0f1a] text-slate-100">
       <div className="mx-auto flex max-w-7xl flex-col gap-10 px-6 pb-16 pt-10">
@@ -336,10 +367,17 @@ export default function Home() {
               />
               <div className={clsx("voice-ripple", assistantActive && "voice-ripple--on")} />
               <button
-                onClick={() => runVoiceQuery()}
-                className="rounded-full bg-white/10 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-200 transition hover:bg-white/20"
+                onClick={handleVoiceCapture}
+                className="rounded-full bg-white/10 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-200 transition hover:bg-white/20"
               >
                 Talk
+              </button>
+              <button
+                onClick={() => runVoiceQuery()}
+                className="grid h-7 w-7 place-items-center rounded-full border border-white/10 bg-white/5 text-sm text-slate-200 transition hover:bg-white/10"
+                aria-label="Send text"
+              >
+                ↑
               </button>
             </div>
           </div>
@@ -416,14 +454,20 @@ export default function Home() {
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div className="flex flex-col gap-2">
               <span className="text-sm uppercase tracking-[0.35em] text-slate-400">Calendar</span>
-              <div className="text-3xl font-semibold text-slate-100">{formatMonthYear()}</div>
+              <div className="text-3xl font-semibold text-slate-100">{calendarTitle}</div>
               <span className="text-xs text-slate-500">Today</span>
             </div>
             <div className="flex items-center gap-3">
-              <button className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-400">
+              <button
+                onClick={() => calendarRef.current?.getApi().prev()}
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-400"
+              >
                 ◀
               </button>
-              <button className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-400">
+              <button
+                onClick={() => calendarRef.current?.getApi().next()}
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-400"
+              >
                 ▶
               </button>
             </div>
@@ -453,16 +497,19 @@ export default function Home() {
           </div>
           <div className="mt-6">
             <FullCalendar
+              ref={calendarRef}
               plugins={[timeGridPlugin, dayGridPlugin, interactionPlugin]}
               initialView="timeGridWeek"
               height={640}
               headerToolbar={false}
               allDaySlot={false}
-              slotMinTime="08:00:00"
-              slotMaxTime="20:00:00"
+              slotMinTime="00:00:00"
+              slotMaxTime="24:00:00"
+              scrollTime="08:00:00"
               events={calendarEvents}
               eventClick={handleEventClick}
               eventDidMount={handleEventMount}
+              datesSet={(info) => setCalendarTitle(formatMonthYear(info.start))}
               eventContent={(info) => {
                 const extended = info.event.extendedProps as EventLoad | undefined;
                 if (!extended?.id) return null;

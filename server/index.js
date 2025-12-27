@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const { GoogleAuth } = require("google-auth-library");
 const { mockEvents } = require("./mockEvents");
 const {
   getAuthUrl,
@@ -107,17 +108,18 @@ app.get("/api/events", async (req, res) => {
 });
 
 app.post("/api/voice/query", async (req, res) => {
-  const { query, summary } = req.body || {};
+  const { query, summary, events } = req.body || {};
 
   if (!query) {
     res.status(400).json({ error: "Missing query." });
     return;
   }
 
-  const responseText = buildVoiceResponse(query, summary);
+  const response = await buildVoiceResponseWithGemini(query, summary, events);
+  const responseText = response.text;
   const voice = await synthesizeVoice(responseText);
 
-  res.json({ text: responseText, audio: voice });
+  res.json({ text: responseText, audio: voice, warning: response.warning });
 });
 
 const PORT = process.env.PORT || 5050;
@@ -151,6 +153,96 @@ function buildVoiceResponse(query, summary) {
   }
 
   return "I'm here to help you protect your capacity. Ask about today's load, moving meetings, or why a meeting is costly.";
+}
+
+async function buildVoiceResponseWithGemini(query, summary, events) {
+  if (!process.env.GCP_PROJECT_ID || !process.env.GCP_LOCATION) {
+    return {
+      text: buildVoiceResponse(query, summary),
+      warning: "Gemini is not configured. Set GCP_PROJECT_ID and GCP_LOCATION.",
+    };
+  }
+
+  try {
+    const auth = new GoogleAuth({
+      scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    });
+    const client = await auth.getClient();
+    const token = await client.getAccessToken();
+
+    const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+    const endpoint = `https://${process.env.GCP_LOCATION}-aiplatform.googleapis.com/v1/projects/${process.env.GCP_PROJECT_ID}/locations/${process.env.GCP_LOCATION}/publishers/google/models/${model}:generateContent`;
+    const summaryText = JSON.stringify(summary || {});
+    const eventLines = Array.isArray(events)
+      ? events.slice(0, 10).map((event) => {
+          const title = event.title || "Untitled";
+          const start = event.start || "unknown start";
+          const end = event.end || "unknown end";
+          const mentalLoad = event.mentalLoad ?? "n/a";
+          const totalLoad = event.totalLoad ?? "n/a";
+          const recoveryMinutes = event.recoveryMinutes ?? "n/a";
+          const classification = event.classification || {};
+          return [
+            `title=${title}`,
+            `start=${start}`,
+            `end=${end}`,
+            `mentalLoad=${mentalLoad}`,
+            `totalLoad=${totalLoad}`,
+            `recoveryMinutes=${recoveryMinutes}`,
+            `meeting_type=${classification.meeting_type || "n/a"}`,
+            `role=${classification.role || "n/a"}`,
+            `emotional_intensity=${classification.emotional_intensity || "n/a"}`,
+          ].join(" | ");
+        })
+      : [];
+
+    const prompt = `You are a calm, supportive calendar coach.
+Use the calendar summary and events to answer the user's question.
+If the data is insufficient, say what is missing.
+Keep the response to 1-2 sentences.
+
+Calendar summary JSON: ${summaryText}
+Upcoming events (max 10):
+${eventLines.join("\n")}
+
+User question: ${query}`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.token || token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 200 },
+      }),
+    });
+
+    if (!response.ok) {
+      return {
+        text: buildVoiceResponse(query, summary),
+        warning: "Gemini request failed. Check Vertex AI API and credentials.",
+      };
+    }
+
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) {
+      return {
+        text: buildVoiceResponse(query, summary),
+        warning: "Gemini returned no content. Check model and request format.",
+      };
+    }
+
+    return { text: text.trim(), warning: "" };
+  } catch (error) {
+    console.error("Gemini voice response failed", error);
+    return {
+      text: buildVoiceResponse(query, summary),
+      warning: "Gemini error. Verify credentials and Vertex AI permissions.",
+    };
+  }
 }
 
 async function synthesizeVoice(text) {

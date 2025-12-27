@@ -62,6 +62,7 @@ export default function Home() {
   const [voiceQuery, setVoiceQuery] = useState("");
   const [voiceResponse, setVoiceResponse] = useState("");
   const [voiceError, setVoiceError] = useState("");
+  const [voiceWarning, setVoiceWarning] = useState("");
   const [voiceStatus, setVoiceStatus] = useState<"idle" | "loading">("idle");
   const [eventSource, setEventSource] = useState<"mock" | "google">("mock");
   const [calendarOptions, setCalendarOptions] = useState<
@@ -259,16 +260,28 @@ export default function Home() {
     const query = queryOverride || voiceQuery;
     if (!query) return;
 
+    const voiceEvents = events.slice(0, 10).map((event) => ({
+      title: event.title,
+      start: event.start,
+      end: event.end,
+      classification: event.classification,
+      mentalLoad: event.mentalLoad,
+      totalLoad: event.totalLoad,
+      recoveryMinutes: event.recoveryMinutes,
+    }));
+
     setVoiceStatus("loading");
     setVoiceError("");
+    setVoiceWarning("");
     try {
       const response = await fetch(`${API_BASE}/api/voice/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, summary }),
+        body: JSON.stringify({ query, summary, events: voiceEvents }),
       });
       const data = await response.json();
       setVoiceResponse(data.text || "");
+      setVoiceWarning(data.warning || "");
 
       if (!response.ok) {
         setVoiceError(data.error || "Voice request failed.");
@@ -635,6 +648,11 @@ export default function Home() {
             {voiceError && (
               <div className="mt-4 rounded-2xl border border-rose-400/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
                 {voiceError}
+              </div>
+            )}
+            {voiceWarning && (
+              <div className="mt-4 rounded-2xl border border-amber-400/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+                {voiceWarning}
               </div>
             )}
           </aside>

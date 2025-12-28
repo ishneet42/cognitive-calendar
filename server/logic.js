@@ -102,6 +102,12 @@ async function classifyWithGemini(event) {
     });
 
     if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      console.error("Gemini classification request failed", {
+        status: response.status,
+        statusText: response.statusText,
+        body: errorBody,
+      });
       return fallbackClassification(event);
     }
 

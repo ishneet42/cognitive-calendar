@@ -164,6 +164,7 @@ async function buildVoiceResponseWithGemini(query, summary, events) {
   }
 
   try {
+    const debug = process.env.GEMINI_DEBUG === "true";
     const auth = new GoogleAuth({
       scopes: ["https://www.googleapis.com/auth/cloud-platform"],
     });
@@ -171,6 +172,7 @@ async function buildVoiceResponseWithGemini(query, summary, events) {
     const token = await client.getAccessToken();
 
     const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+    const maxOutputTokens = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 300);
     const endpoint = `https://${process.env.GCP_LOCATION}-aiplatform.googleapis.com/v1/projects/${process.env.GCP_PROJECT_ID}/locations/${process.env.GCP_LOCATION}/publishers/google/models/${model}:generateContent`;
     const summaryText = JSON.stringify(summary || {});
     const eventLines = Array.isArray(events)
@@ -215,19 +217,28 @@ User question: ${query}`;
       },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.3, maxOutputTokens: 200 },
+        generationConfig: { temperature: 0.3, maxOutputTokens },
       }),
     });
 
     if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      console.error("Gemini voice request failed", {
+        status: response.status,
+        statusText: response.statusText,
+        body: errorBody,
+      });
       return {
         text: buildVoiceResponse(query, summary),
-        warning: "Gemini request failed. Check Vertex AI API and credentials.",
+        warning: debug
+          ? `Gemini request failed (${response.status} ${response.statusText}). ${errorBody}`
+          : "Gemini request failed. Check Vertex AI API and credentials.",
       };
     }
 
     const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidate = data?.candidates?.[0];
+    const text = candidate?.content?.parts?.[0]?.text;
     if (!text) {
       return {
         text: buildVoiceResponse(query, summary),
@@ -235,7 +246,13 @@ User question: ${query}`;
       };
     }
 
-    return { text: text.trim(), warning: "" };
+    const finishReason = candidate?.finishReason;
+    const warning =
+      finishReason === "MAX_TOKENS"
+        ? "Gemini response may be truncated. Increase GEMINI_MAX_OUTPUT_TOKENS."
+        : "";
+
+    return { text: text.trim(), warning };
   } catch (error) {
     console.error("Gemini voice response failed", error);
     return {

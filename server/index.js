@@ -9,6 +9,7 @@ const {
   hasTokens,
   fetchCalendarEvents,
   listCalendars,
+  createCalendarEvent,
 } = require("./googleCalendar");
 const {
   BASELINES,
@@ -108,10 +109,29 @@ app.get("/api/events", async (req, res) => {
 });
 
 app.post("/api/voice/query", async (req, res) => {
-  const { query, summary, events } = req.body || {};
+  const { query, summary, events, source, calendarId } = req.body || {};
 
   if (!query) {
     res.status(400).json({ error: "Missing query." });
+    return;
+  }
+
+  const actionResult = await handleVoiceAction({
+    query,
+    source,
+    calendarId,
+  });
+
+  if (actionResult) {
+    const responseText = actionResult.text;
+    const voice = await synthesizeVoice(responseText);
+    res.json({
+      text: responseText,
+      audio: voice,
+      warning: actionResult.warning,
+      action: actionResult.action,
+      event: actionResult.event,
+    });
     return;
   }
 
@@ -155,6 +175,149 @@ function buildVoiceResponse(query, summary) {
   return "I'm here to help you protect your capacity. Ask about today's load, moving meetings, or why a meeting is costly.";
 }
 
+function looksLikeCreateEvent(query) {
+  const normalized = query.toLowerCase();
+  return (
+    normalized.includes("add event") ||
+    normalized.includes("create event") ||
+    normalized.includes("schedule") ||
+    normalized.includes("book") ||
+    normalized.includes("add meeting") ||
+    normalized.includes("create meeting")
+  );
+}
+
+function parseJsonResponse(text) {
+  if (!text) return null;
+  const cleaned = text.trim().replace(/^```json/i, "").replace(/^```/, "").replace(/```$/, "");
+  try {
+    return JSON.parse(cleaned);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function formatEventConfirmation(event, timeZone) {
+  const start = new Date(event.start);
+  const end = new Date(event.end);
+  const formatOptions = {
+    timeZone,
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  };
+  const startText = start.toLocaleString("en-US", formatOptions);
+  const endText = end.toLocaleString("en-US", formatOptions);
+  return `Added "${event.title}" on ${startText} to ${endText}.`;
+}
+
+function hasTimeZoneOffset(value) {
+  return /[zZ]|[+-]\d{2}:?\d{2}$/.test(value || "");
+}
+
+async function handleVoiceAction({ query, source, calendarId }) {
+  if (!looksLikeCreateEvent(query)) {
+    return null;
+  }
+
+  if (!process.env.GCP_PROJECT_ID || !process.env.GCP_LOCATION) {
+    return {
+      action: "create_event",
+      text: "Event creation needs Gemini configured. Set GCP_PROJECT_ID and GCP_LOCATION.",
+      warning: "Gemini is not configured for event creation.",
+    };
+  }
+
+  const parsed = await parseEventRequestWithGemini(query);
+  if (!parsed || parsed.action !== "create_event") {
+    return {
+      action: "create_event",
+      text: "I couldn't read the event details. Try: Add event on Dec 31, 2025 from 1pm to 2pm for Meeting with Investors.",
+      warning: "Gemini did not return a valid event.",
+    };
+  }
+
+  const fallbackZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const timeZone = parsed.timeZone || fallbackZone;
+  const startDate = parsed.start ? new Date(parsed.start) : null;
+  const endDate = parsed.end ? new Date(parsed.end) : null;
+  if (!startDate || Number.isNaN(startDate.valueOf())) {
+    return {
+      action: "create_event",
+      text: "I couldn't find a valid event start time. Please provide a date and time.",
+      warning: "Missing event start time.",
+    };
+  }
+
+  const finalEnd =
+    endDate && !Number.isNaN(endDate.valueOf())
+      ? endDate
+      : new Date(startDate.getTime() + 60 * 60 * 1000);
+  const inferredTimeZone = hasTimeZoneOffset(parsed.start) ? undefined : timeZone;
+
+  const eventPayload = {
+    title: parsed.title || "New Event",
+    description: parsed.description || "",
+    start: parsed.start || startDate.toISOString(),
+    end: parsed.end || finalEnd.toISOString(),
+    timeZone: inferredTimeZone,
+  };
+
+  if (source === "google") {
+    if (!hasTokens()) {
+      return {
+        action: "create_event",
+        text: "You're not connected to Google Calendar yet. Please sign in first.",
+        warning: "Missing Google Calendar tokens.",
+      };
+    }
+
+    const created = await createCalendarEvent({
+      calendarId: calendarId || "primary",
+      ...eventPayload,
+    });
+
+    if (!created) {
+      return {
+        action: "create_event",
+        text: "I couldn't create the event. Check Google Calendar permissions.",
+        warning: "Google Calendar insert failed.",
+      };
+    }
+
+    return {
+      action: "create_event",
+      text: formatEventConfirmation(
+        { ...created, title: eventPayload.title },
+        timeZone || fallbackZone
+      ),
+      event: created,
+    };
+  }
+
+  const mockEvent = {
+    id: `evt-${Date.now()}`,
+    title: eventPayload.title,
+    description: eventPayload.description,
+    start: eventPayload.start,
+    end: eventPayload.end,
+    attendeeCount: 1,
+    userRole: "contributor",
+    meetingType: "status",
+    emotionalIntensity: "routine",
+    topicTags: [],
+  };
+  mockEvents.push(mockEvent);
+
+  return {
+    action: "create_event",
+    text: formatEventConfirmation(mockEvent, timeZone || fallbackZone),
+    event: mockEvent,
+  };
+}
+
 async function buildVoiceResponseWithGemini(query, summary, events) {
   if (!process.env.GCP_PROJECT_ID || !process.env.GCP_LOCATION) {
     return {
@@ -175,35 +338,67 @@ async function buildVoiceResponseWithGemini(query, summary, events) {
     const maxOutputTokens = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS || 300);
     const endpoint = `https://${process.env.GCP_LOCATION}-aiplatform.googleapis.com/v1/projects/${process.env.GCP_PROJECT_ID}/locations/${process.env.GCP_LOCATION}/publishers/google/models/${model}:generateContent`;
     const summaryText = JSON.stringify(summary || {});
-    const eventLines = Array.isArray(events)
-      ? events.slice(0, 10).map((event) => {
-          const title = event.title || "Untitled";
-          const start = event.start || "unknown start";
-          const end = event.end || "unknown end";
-          const mentalLoad = event.mentalLoad ?? "n/a";
-          const totalLoad = event.totalLoad ?? "n/a";
-          const recoveryMinutes = event.recoveryMinutes ?? "n/a";
-          const classification = event.classification || {};
-          return [
-            `title=${title}`,
-            `start=${start}`,
-            `end=${end}`,
-            `mentalLoad=${mentalLoad}`,
-            `totalLoad=${totalLoad}`,
-            `recoveryMinutes=${recoveryMinutes}`,
-            `meeting_type=${classification.meeting_type || "n/a"}`,
-            `role=${classification.role || "n/a"}`,
-            `emotional_intensity=${classification.emotional_intensity || "n/a"}`,
-          ].join(" | ");
-        })
-      : [];
+    const now = new Date();
+    const normalizedQuery = query.toLowerCase();
+    const wantsToday =
+      normalizedQuery.includes("today") ||
+      normalizedQuery.includes("current date") ||
+      normalizedQuery.includes("today's date") ||
+      normalizedQuery.includes("current day");
+
+    const sourceEvents = Array.isArray(events) ? events : [];
+    const todayEvents = sourceEvents.filter((event) => {
+      const start = new Date(event.start);
+      if (Number.isNaN(start.valueOf())) {
+        return false;
+      }
+      return (
+        start.getFullYear() === now.getFullYear() &&
+        start.getMonth() === now.getMonth() &&
+        start.getDate() === now.getDate()
+      );
+    });
+    const filteredEvents = wantsToday ? todayEvents : sourceEvents;
+
+    const eventLines = filteredEvents.slice(0, 10).map((event) => {
+      const title = event.title || "Untitled";
+      const start = event.start || "unknown start";
+      const end = event.end || "unknown end";
+      const mentalLoad = event.mentalLoad ?? "n/a";
+      const totalLoad = event.totalLoad ?? "n/a";
+      const recoveryMinutes = event.recoveryMinutes ?? "n/a";
+      const classification = event.classification || {};
+      return [
+        `title=${title}`,
+        `start=${start}`,
+        `end=${end}`,
+        `mentalLoad=${mentalLoad}`,
+        `totalLoad=${totalLoad}`,
+        `recoveryMinutes=${recoveryMinutes}`,
+        `meeting_type=${classification.meeting_type || "n/a"}`,
+        `role=${classification.role || "n/a"}`,
+        `emotional_intensity=${classification.emotional_intensity || "n/a"}`,
+      ].join(" | ");
+    });
+
+    const todayLines = todayEvents.slice(0, 10).map((event) => {
+      const title = event.title || "Untitled";
+      const start = event.start || "unknown start";
+      const end = event.end || "unknown end";
+      return [`title=${title}`, `start=${start}`, `end=${end}`].join(" | ");
+    });
 
     const prompt = `You are a calm, supportive calendar coach.
 Use the calendar summary and events to answer the user's question.
 If the data is insufficient, say what is missing.
-Keep the response to 1-2 sentences.
+Always use the provided current date/time as the source of truth for "today".
+If the user asks about today, rely on the "Today's events" list.
+Keep the response concise (1-3 sentences).
 
+Current date/time: ${now.toISOString()} (local: ${now.toString()})
 Calendar summary JSON: ${summaryText}
+Today's events (max 10):
+${todayLines.join("\n")}
 Upcoming events (max 10):
 ${eventLines.join("\n")}
 
@@ -260,6 +455,56 @@ User question: ${query}`;
       warning: "Gemini error. Verify credentials and Vertex AI permissions.",
     };
   }
+}
+
+async function parseEventRequestWithGemini(query) {
+  const auth = new GoogleAuth({
+    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+  });
+  const client = await auth.getClient();
+  const token = await client.getAccessToken();
+
+  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+  const endpoint = `https://${process.env.GCP_LOCATION}-aiplatform.googleapis.com/v1/projects/${process.env.GCP_PROJECT_ID}/locations/${process.env.GCP_LOCATION}/publishers/google/models/${model}:generateContent`;
+
+  const now = new Date();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const prompt = `You extract event creation details from user requests.
+Return JSON only with keys: action, title, description, start, end, timeZone.
+- action must be "create_event" or "none".
+- start and end must be ISO-8601 date-time strings with timezone offsets.
+- Use the provided timeZone if the user does not specify one.
+- If the request is not to create an event, return {"action":"none"}.
+
+Current date/time: ${now.toISOString()} (local: ${now.toString()})
+Default timeZone: ${timeZone}
+User request: ${query}`;
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token.token || token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.1, maxOutputTokens: 256 },
+    }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => "");
+    console.error("Gemini event parse failed", {
+      status: response.status,
+      statusText: response.statusText,
+      body: errorBody,
+    });
+    return null;
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return parseJsonResponse(text);
 }
 
 async function synthesizeVoice(text) {

@@ -1,6 +1,6 @@
 const { google } = require("googleapis");
 
-const SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"];
+const SCOPES = ["https://www.googleapis.com/auth/calendar"];
 const tokenStore = {
   tokens: null,
 };
@@ -60,6 +60,38 @@ async function fetchCalendarEvents({ timeMin, timeMax, calendarId = "primary" })
 
   const items = response.data.items || [];
   return items.map((item) => mapGoogleEvent(item));
+}
+
+async function createCalendarEvent({
+  calendarId = "primary",
+  title,
+  description,
+  start,
+  end,
+  timeZone,
+}) {
+  const client = getOAuthClient();
+  if (!client || !tokenStore.tokens) {
+    return null;
+  }
+
+  client.setCredentials(tokenStore.tokens);
+  const calendar = google.calendar({ version: "v3", auth: client });
+  const response = await calendar.events.insert({
+    calendarId,
+    requestBody: {
+      summary: title || "New Event",
+      description: description || "",
+      start: timeZone ? { dateTime: start, timeZone } : { dateTime: start },
+      end: timeZone ? { dateTime: end, timeZone } : { dateTime: end },
+    },
+  });
+
+  if (!response.data) {
+    return null;
+  }
+
+  return mapGoogleEvent(response.data);
 }
 
 async function listCalendars() {
@@ -122,4 +154,5 @@ module.exports = {
   hasTokens,
   fetchCalendarEvents,
   listCalendars,
+  createCalendarEvent,
 };

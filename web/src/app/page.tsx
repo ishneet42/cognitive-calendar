@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import FullCalendar from "@fullcalendar/react";
 import timeGridPlugin from "@fullcalendar/timegrid";
 import dayGridPlugin from "@fullcalendar/daygrid";
@@ -75,8 +75,9 @@ export default function Home() {
   const [calendarTitle, setCalendarTitle] = useState<string>(formatMonthYear());
   const calendarRef = useRef<FullCalendar | null>(null);
 
-  useEffect(() => {
-    const fetchEvents = async (source: "mock" | "google") => {
+  const loadEvents = useCallback(
+    async (sourceOverride?: "mock" | "google") => {
+      const source = sourceOverride || eventSource;
       const response = await fetch(
         `${API_BASE}/api/events${
           source === "google"
@@ -91,10 +92,13 @@ export default function Home() {
         setSelectedEvent(data.events[0]);
         setSelectedDayIndex(getWeekdayIndex(new Date(data.events[0].start)));
       }
-    };
+    },
+    [eventSource, calendarId]
+  );
 
-    fetchEvents(eventSource);
-  }, [eventSource, calendarId]);
+  useEffect(() => {
+    loadEvents();
+  }, [loadEvents]);
 
   useEffect(() => {
     if (eventSource !== "google") return;
@@ -279,7 +283,13 @@ export default function Home() {
       const response = await fetch(`${API_BASE}/api/voice/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, summary, events: voiceEvents }),
+        body: JSON.stringify({
+          query,
+          summary,
+          events: voiceEvents,
+          source: eventSource,
+          calendarId,
+        }),
       });
       const data = await response.json();
       setVoiceResponse(data.text || "");
@@ -295,6 +305,10 @@ export default function Home() {
         audio.play();
       } else if (data.audio?.status) {
         setVoiceError(data.audio.reason || "Voice audio unavailable.");
+      }
+
+      if (data.action === "create_event") {
+        await loadEvents();
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Voice request failed.";

@@ -1,0 +1,14 @@
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--build-arg"
+      - "NEXT_PUBLIC_API_BASE=${_NEXT_PUBLIC_API_BASE}"
+      - "-t"
+      - "${_IMAGE}"
+      - "."
+images:
+  - "${_IMAGE}"
+substitutions:
+  _NEXT_PUBLIC_API_BASE: "http://localhost:5050"
+  _IMAGE: "us-central1-docker.pkg.dev/PROJECT_ID/cognitive-calendar/cognitive-web:latest"

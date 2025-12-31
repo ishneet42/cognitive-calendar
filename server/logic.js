@@ -10,6 +10,20 @@ const BASELINES = {
     design_review: 0.8,
     decision: 0.9,
     conflict: 1.0,
+    sync: 0.15,
+    social: 0.05,
+  },
+  meetingTypeScalar: {
+    standup: 1.0,
+    status: 1.0,
+    demo: 1.0,
+    planning: 1.0,
+    brainstorming: 1.0,
+    design_review: 1.0,
+    decision: 1.0,
+    conflict: 1.0,
+    sync: 0.3,
+    social: 0.12,
   },
   roleLoad: {
     listener: 0.3,
@@ -62,15 +76,55 @@ Attendees: {{attendee_count}}
 User role: {{user_role}}
 
 Return JSON with:
-- meeting_type: one of [standup, status, demo, planning, brainstorming, design_review, decision, conflict]
+- meeting_type: one of [standup, status, demo, planning, brainstorming, design_review, decision, conflict, sync, social]
 - role: one of [listener, occasional_contributor, contributor, decision_maker]
 - emotional_intensity: one of [routine, external, feedback, performance, conflict]
 - topic_tags: up to 3 short tags
 
-Respond with JSON only. No explanations.`;
+Guidance:
+- Use "social" for birthdays, celebrations, team bonding, or non-work gatherings.
+- Use "sync" for routine project syncs, weekly check-ins, or coordination meetings.
+
+Respond with JSON only. No explanations. Do not wrap the response in backticks or code fences.
+Return only the JSON object and nothing else. Any additional text will break the system.`;
+
+const GEMINI_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    meeting_type: {
+      type: "STRING",
+      enum: [
+        "standup",
+        "status",
+        "demo",
+        "planning",
+        "brainstorming",
+        "design_review",
+        "decision",
+        "conflict",
+        "sync",
+        "social",
+      ],
+    },
+    role: {
+      type: "STRING",
+      enum: ["listener", "occasional_contributor", "contributor", "decision_maker"],
+    },
+    emotional_intensity: {
+      type: "STRING",
+      enum: ["routine", "external", "feedback", "performance", "conflict"],
+    },
+    topic_tags: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+    },
+  },
+  required: ["meeting_type", "role", "emotional_intensity", "topic_tags"],
+};
 
 async function classifyWithGemini(event) {
   if (!process.env.GCP_PROJECT_ID || !process.env.GCP_LOCATION) {
+    console.warn("Gemini not configured; using fallback classification.");
     return fallbackClassification(event);
   }
 
@@ -97,7 +151,12 @@ async function classifyWithGemini(event) {
       },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 256 },
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 256,
+          responseMimeType: "application/json",
+          responseSchema: GEMINI_RESPONSE_SCHEMA,
+        },
       }),
     });
 
@@ -108,34 +167,155 @@ async function classifyWithGemini(event) {
         statusText: response.statusText,
         body: errorBody,
       });
+      console.warn("Falling back to heuristic classification.");
       return fallbackClassification(event);
     }
 
     const data = await response.json();
     const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    if (process.env.GEMINI_DEBUG === "true") {
+      console.log("Gemini raw response:", {
+        title: event.title,
+        text,
+      });
+    }
 
-    return parseGeminiOutput(text, event);
+    let parsedResult = parseGeminiOutput(text, event);
+    if (!parsedResult.ok && shouldRetryGemini(text)) {
+      const retry = await retryGeminiClassification(event, prompt, token);
+      if (retry.text) {
+        parsedResult = parseGeminiOutput(retry.text, event);
+      }
+    }
+
+    const finalClassification = applyTitleOverrides(event, parsedResult.classification);
+    if (process.env.GEMINI_DEBUG === "true") {
+      console.log("Gemini classification:", {
+        title: event.title,
+        classification: finalClassification,
+      });
+    }
+    return finalClassification;
   } catch (error) {
     console.error("Gemini classification failed", error);
-    return fallbackClassification(event);
+    console.warn("Falling back to heuristic classification.");
+    return applyTitleOverrides(event, fallbackClassification(event));
   }
 }
 
 function parseGeminiOutput(text, event) {
+  const cleaned = (text || "")
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const jsonSlice = extractJsonBlock(cleaned);
+  const candidate = jsonSlice || cleaned;
+
   try {
-    const parsed = JSON.parse(text);
+    const parsed = JSON.parse(candidate);
     if (!parsed.meeting_type || !parsed.role || !parsed.emotional_intensity) {
-      return fallbackClassification(event);
+      console.warn("Gemini response missing fields; using fallback classification.");
+      return { ok: false, classification: fallbackClassification(event) };
     }
     return {
-      meeting_type: parsed.meeting_type,
-      role: parsed.role,
-      emotional_intensity: parsed.emotional_intensity,
-      topic_tags: Array.isArray(parsed.topic_tags) ? parsed.topic_tags : [],
+      ok: true,
+      classification: {
+        meeting_type: parsed.meeting_type,
+        role: parsed.role,
+        emotional_intensity: parsed.emotional_intensity,
+        topic_tags: Array.isArray(parsed.topic_tags) ? parsed.topic_tags : [],
+      },
     };
   } catch (_error) {
-    return fallbackClassification(event);
+    console.warn("Gemini response was not valid JSON; using fallback classification.");
+    return { ok: false, classification: fallbackClassification(event) };
   }
+}
+
+function extractJsonBlock(text) {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+function shouldRetryGemini(text) {
+  const trimmed = (text || "").trim();
+  if (!trimmed) return false;
+  const hasOpenBrace = trimmed.includes("{");
+  const hasCloseBrace = trimmed.includes("}");
+  return hasOpenBrace && !hasCloseBrace;
+}
+
+async function retryGeminiClassification(event, prompt, token) {
+  try {
+    const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+    const endpoint = `https://${process.env.GCP_LOCATION}-aiplatform.googleapis.com/v1/projects/${process.env.GCP_PROJECT_ID}/locations/${process.env.GCP_LOCATION}/publishers/google/models/${model}:generateContent`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token.token || token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 128,
+          responseMimeType: "application/json",
+          responseSchema: GEMINI_RESPONSE_SCHEMA,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      console.error("Gemini retry failed", {
+        status: response.status,
+        statusText: response.statusText,
+        body: errorBody,
+      });
+      return { text: "" };
+    }
+
+    const data = await response.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    if (process.env.GEMINI_DEBUG === "true") {
+      console.log("Gemini retry raw response:", {
+        title: event.title,
+        text,
+      });
+    }
+    return { text };
+  } catch (error) {
+    console.error("Gemini retry failed", error);
+    return { text: "" };
+  }
+}
+
+function applyTitleOverrides(event, classification) {
+  const title = (event.title || "").toLowerCase();
+
+  if (title.includes("birthday") || title.includes("celebration")) {
+    return {
+      ...classification,
+      meeting_type: "social",
+      emotional_intensity: "routine",
+    };
+  }
+
+  if (title.includes("sync") || title.includes("check-in") || title.includes("check in")) {
+    return {
+      ...classification,
+      meeting_type: "sync",
+      emotional_intensity: "routine",
+    };
+  }
+
+  return classification;
 }
 
 function fallbackClassification(event) {
@@ -176,10 +356,13 @@ function computeSingleEvent(event, prev) {
   const emotionalLoad =
     BASELINES.emotionalLoad[event.classification.emotional_intensity] ?? 0.4;
 
+  const socialLoad = mapSocialLoad(event.attendeeCount || 1);
   const mentalLoadRaw =
     (durationMinutes / 60) *
-    (0.4 * complexity + 0.3 * roleLoad + 0.3 * emotionalLoad);
-  const mentalLoad = clamp(mentalLoadRaw);
+    (0.35 * complexity + 0.25 * roleLoad + 0.25 * emotionalLoad + 0.15 * socialLoad);
+  const meetingTypeScalar =
+    BASELINES.meetingTypeScalar[event.classification.meeting_type] ?? 1.0;
+  const mentalLoad = clamp(mentalLoadRaw * meetingTypeScalar);
 
   const contextSwitchCost = computeContextSwitch(event, prev);
   const totalLoad = clamp(mentalLoad + contextSwitchCost);
@@ -188,7 +371,6 @@ function computeSingleEvent(event, prev) {
   const recoveryMinutes =
     totalLoad * 20 * (BASELINES.timeOfDayMultiplier[timeOfDay] || 1.0);
 
-  const socialLoad = mapSocialLoad(event.attendeeCount || 1);
   const capacityCost = totalLoad * 100;
 
   return {
@@ -207,6 +389,7 @@ function computeSingleEvent(event, prev) {
       emotionalLoad,
       socialLoad,
       mentalLoad,
+      meetingTypeScalar,
       contextSwitchCost,
       timeOfDayMultiplier: BASELINES.timeOfDayMultiplier[timeOfDay] || 1.0,
       topicTags: event.classification.topic_tags,

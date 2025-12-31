@@ -64,7 +64,10 @@ export default function Home() {
   const [voiceError, setVoiceError] = useState("");
   const [voiceWarning, setVoiceWarning] = useState("");
   const [voiceStatus, setVoiceStatus] = useState<"idle" | "loading">("idle");
-  const [eventSource, setEventSource] = useState<"mock" | "google">("mock");
+  const [authStatus, setAuthStatus] = useState<
+    "checking" | "unauthenticated" | "authenticated"
+  >("checking");
+  const [authError, setAuthError] = useState("");
   const [calendarOptions, setCalendarOptions] = useState<
     { id: string; summary: string; primary: boolean }[]
   >([]);
@@ -75,48 +78,62 @@ export default function Home() {
   const [calendarTitle, setCalendarTitle] = useState<string>(formatMonthYear());
   const calendarRef = useRef<FullCalendar | null>(null);
 
-  const loadEvents = useCallback(
-    async (sourceOverride?: "mock" | "google") => {
-      const source = sourceOverride || eventSource;
-      const response = await fetch(
-        `${API_BASE}/api/events${
-          source === "google"
-            ? `?source=google&calendarId=${encodeURIComponent(calendarId)}`
-            : ""
-        }`
-      );
-      const data = await response.json();
-      setEvents(data.events || []);
-      setSummary(data.summary || null);
-      if (data.events?.length) {
-        setSelectedEvent(data.events[0]);
-        setSelectedDayIndex(getWeekdayIndex(new Date(data.events[0].start)));
-      }
-    },
-    [eventSource, calendarId]
-  );
+  const loadEvents = useCallback(async () => {
+    if (authStatus !== "authenticated") return;
+
+    const response = await fetch(
+      `${API_BASE}/api/events?source=google&calendarId=${encodeURIComponent(calendarId)}`
+    );
+    if (response.status === 401) {
+      setAuthStatus("unauthenticated");
+      return;
+    }
+    const data = await response.json();
+    setEvents(data.events || []);
+    setSummary(data.summary || null);
+    if (data.events?.length) {
+      setSelectedEvent(data.events[0]);
+      setSelectedDayIndex(getWeekdayIndex(new Date(data.events[0].start)));
+    }
+  }, [authStatus, calendarId]);
 
   useEffect(() => {
-    loadEvents();
-  }, [loadEvents]);
-
-  useEffect(() => {
-    if (eventSource !== "google") return;
-
     const fetchCalendars = async () => {
-      const response = await fetch(`${API_BASE}/api/google/calendars`);
-      const data = await response.json();
-      if (data.calendars?.length) {
-        setCalendarOptions(data.calendars);
-        const primary = data.calendars.find(
-          (calendar: { primary: boolean }) => calendar.primary
-        );
-        setCalendarId(primary?.id || data.calendars[0].id);
+      try {
+        const response = await fetch(`${API_BASE}/api/google/calendars`);
+        if (response.status === 401) {
+          setAuthStatus("unauthenticated");
+          return;
+        }
+        if (!response.ok) {
+          setAuthStatus("unauthenticated");
+          setAuthError("We could not reach Google Calendar. Try again.");
+          return;
+        }
+        const data = await response.json();
+        if (data.calendars?.length) {
+          setCalendarOptions(data.calendars);
+          const primary = data.calendars.find(
+            (calendar: { primary: boolean }) => calendar.primary
+          );
+          setCalendarId(primary?.id || data.calendars[0].id);
+          setAuthStatus("authenticated");
+          setAuthError("");
+        } else {
+          setAuthStatus("authenticated");
+        }
+      } catch (_error) {
+        setAuthStatus("unauthenticated");
+        setAuthError("We could not reach the API. Check if the server is running.");
       }
     };
 
     fetchCalendars();
-  }, [eventSource]);
+  }, []);
+
+  useEffect(() => {
+    loadEvents();
+  }, [loadEvents]);
 
   const backToBackIds = useMemo(() => {
     const ids = new Set<string>();
@@ -287,7 +304,7 @@ export default function Home() {
           query,
           summary,
           events: voiceEvents,
-          source: eventSource,
+          source: "google",
           calendarId,
         }),
       });
@@ -333,7 +350,7 @@ export default function Home() {
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
-    recognition.onresult = (event) => {
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
       const transcript = event.results[0][0].transcript;
       setVoiceQuery(transcript);
       runVoiceQuery(transcript);
@@ -346,6 +363,38 @@ export default function Home() {
 
     recognition.start();
   };
+
+  if (authStatus !== "authenticated") {
+    return (
+      <div className="min-h-screen bg-[#0b0f1a] text-slate-100">
+        <div className="mx-auto flex min-h-screen max-w-3xl flex-col items-center justify-center gap-6 px-6 text-center">
+          <p className="text-xs uppercase tracking-[0.5em] text-slate-500">
+            Cognitive Calendar
+          </p>
+          <h1 className="text-4xl font-semibold text-slate-100">
+            Protect your capacity before the week fills up.
+          </h1>
+          <p className="text-sm text-slate-400">
+            Connect your Google Calendar to visualize cognitive load, context switching, and
+            recovery buffers.
+          </p>
+          {authStatus === "checking" ? (
+            <span className="rounded-full border border-white/10 bg-white/5 px-5 py-2 text-xs uppercase tracking-[0.3em] text-slate-400">
+              Checking connection
+            </span>
+          ) : (
+            <a
+              href={`${API_BASE}/api/google/oauth/start`}
+              className="rounded-full border border-emerald-300 bg-emerald-300 px-6 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-slate-900"
+            >
+              Continue with Google
+            </a>
+          )}
+          {authError ? <p className="text-xs text-rose-200">{authError}</p> : null}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0b0f1a] text-slate-100">
@@ -416,35 +465,10 @@ export default function Home() {
             for sustainable focus.
           </p>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <button
-              onClick={() => setEventSource("mock")}
-              className={clsx(
-                "rounded-full border px-4 py-1.5 font-medium transition",
-                eventSource === "mock"
-                  ? "border-slate-200 bg-slate-100 text-slate-900"
-                  : "border-white/10 bg-white/5 text-slate-300"
-              )}
-            >
-              Use mock calendar
-            </button>
-            <button
-              onClick={() => setEventSource("google")}
-              className={clsx(
-                "rounded-full border px-4 py-1.5 font-medium transition",
-                eventSource === "google"
-                  ? "border-emerald-300 bg-emerald-300 text-slate-900"
-                  : "border-emerald-300/30 bg-white/5 text-emerald-200"
-              )}
-            >
-              Load Google Calendar
-            </button>
-            <a
-              href={`${API_BASE}/api/google/oauth/start`}
-              className="rounded-full border border-white/10 bg-white/5 px-4 py-1.5 font-medium text-slate-300"
-            >
-              Connect Google Account
-            </a>
-            {eventSource === "google" && calendarOptions.length > 0 && (
+            <span className="rounded-full border border-emerald-300/40 bg-emerald-300/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] text-emerald-100">
+              Google connected
+            </span>
+            {calendarOptions.length > 0 && (
               <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-1.5 text-sm text-slate-300">
                 <span>Calendar</span>
                 <select

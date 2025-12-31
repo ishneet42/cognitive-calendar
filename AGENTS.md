@@ -13,6 +13,6 @@ This repository contains Cognitive Calendar, a hackathon-ready prototype that vi
 - Frontend: `cd web && npm install && npm run dev`
 
 ## Notes for Agents
-- Do not modify the heuristic formulas or baseline tables in `server/logic.js`.
+- Do not modify the heuristic formulas or baseline tables in `server/logic.js` unless you are asked to.
 - Keep outputs deterministic and explainable.
 - Keep UI copy aligned with the product concept.

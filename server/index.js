@@ -109,7 +109,7 @@ app.get("/api/events", async (req, res) => {
 });
 
 app.post("/api/voice/query", async (req, res) => {
-  const { query, summary, events, source, calendarId } = req.body || {};
+  const { query, summary, events, source, calendarId, tone } = req.body || {};
 
   if (!query) {
     res.status(400).json({ error: "Missing query." });
@@ -135,7 +135,7 @@ app.post("/api/voice/query", async (req, res) => {
     return;
   }
 
-  const response = await buildVoiceResponseWithGemini(query, summary, events);
+  const response = await buildVoiceResponseWithGemini(query, summary, events, tone);
   const responseText = response.text;
   const voice = await synthesizeVoice(responseText);
 
@@ -147,32 +147,103 @@ app.listen(PORT, () => {
   console.log(`Cognitive Calendar API running on :${PORT}`);
 });
 
-function buildVoiceResponse(query, summary) {
+function buildVoiceResponse(query, summary, toneOverride) {
   const normalized = query.toLowerCase();
   const safeSummary = summary || {};
   const capacity = safeSummary.capacityRemaining ?? 100;
   const totalLoad = safeSummary.totalLoad ?? 0;
   const highRisk = safeSummary.highRisk;
+  const tone = getVoiceTone({ query: normalized, summary: safeSummary, override: toneOverride });
 
-  if (normalized.includes("how heavy")) {
-    return `Your day is at ${Math.round(totalLoad * 100)} percent load. You have ${Math.round(
-      capacity
-    )} capacity units left. Remember, you don't have time — you have capacity.`;
+  if (
+    normalized.includes("how heavy") ||
+    normalized.includes("summary") ||
+    normalized.includes("explain")
+  ) {
+    return buildSummaryResponse({ tone, totalLoad, capacity, highRisk });
   }
 
-  if (normalized.includes("move")) {
-    return "Yes, moving a high-load meeting later can protect your recovery buffer. Look for a slot with more capacity.";
+  if (isPracticalQuery(normalized)) {
+    return buildPracticalResponse({ totalLoad, capacity, highRisk });
   }
 
   if (normalized.includes("why")) {
-    return "That meeting is expensive because the mental demand, emotional intensity, and context switching costs stack up. I can show the exact baseline factors in the explanation panel.";
+    if (tone === "supportive") {
+      return "That meeting takes more out of you because the mental demand, emotional intensity, and context switching stack up. We can look at the specific signals together in the explanation panel.";
+    }
+    if (tone === "practical") {
+      return "That meeting is heavier because mental demand, emotional intensity, and context switching stack up. I can point to the exact signals in the explanation panel.";
+    }
+    return "That meeting is heavier because mental demand, emotional intensity, and context switching stack up. I can show the exact signals in the explanation panel.";
   }
 
+  if (highRisk && tone === "supportive") {
+    return "Today asked a lot from you. Nothing is wrong — it was simply a full day. Even a small pause tomorrow could help you reset.";
+  }
+
+  if (tone === "practical") {
+    return "I can help you protect capacity by moving or spacing meetings. Tell me what you want to adjust, and I’ll suggest a low-impact change.";
+  }
+  if (tone === "supportive") {
+    return "I’m here to help you protect your capacity, especially on full days. Ask about today’s load, recovery buffers, or spacing meetings.";
+  }
+  return "I’m here to help you notice patterns in your capacity. Ask about today’s load, recovery buffers, or why a meeting feels costly.";
+}
+
+function getVoiceTone({ query, summary, override }) {
+  if (override && override !== "auto") {
+    return normalizeVoiceTone(override);
+  }
+  if (isPracticalQuery(query)) return "practical";
+  if (summary?.highRisk || (summary?.totalLoad ?? 0) >= 0.65) return "supportive";
+  return "reflective";
+}
+
+function normalizeVoiceTone(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "supportive") return "supportive";
+  if (normalized === "practical") return "practical";
+  return "reflective";
+}
+
+function isPracticalQuery(query) {
+  return (
+    query.includes("move") ||
+    query.includes("reschedule") ||
+    query.includes("shift") ||
+    query.includes("swap") ||
+    query.includes("what should i move") ||
+    query.includes("what can i move") ||
+    query.includes("how can i recover") ||
+    query.includes("recovery") ||
+    query.includes("buffer") ||
+    query.includes("plan") ||
+    query.includes("schedule")
+  );
+}
+
+function buildSummaryResponse({ tone, totalLoad, capacity, highRisk }) {
+  const loadPercent = Math.round(totalLoad * 100);
+  const capacityLeft = Math.round(capacity);
+  if (tone === "supportive") {
+    return `Today asked a lot from you. Nothing is wrong — it was simply a full day. You still have about ${capacityLeft} capacity points left.`;
+  }
+  if (tone === "practical") {
+    return `Your day is around ${loadPercent}% load with about ${capacityLeft} capacity points left. If you want, we can move or space one meeting to create a clean recovery break.`;
+  }
   if (highRisk) {
-    return "Today is a higher burnout risk. Consider adding recovery buffers or reducing context switches.";
+    return `Today was full, with around ${loadPercent}% load. You kept some recovery space, which helps balance the day.`;
   }
+  return `Today had a steady load, around ${loadPercent}%. You kept some recovery space, which helped balance the day.`;
+}
 
-  return "I'm here to help you protect your capacity. Ask about today's load, moving meetings, or why a meeting is costly.";
+function buildPracticalResponse({ totalLoad, capacity, highRisk }) {
+  const loadPercent = Math.round(totalLoad * 100);
+  const capacityLeft = Math.round(capacity);
+  if (highRisk || totalLoad >= 0.65) {
+    return `Tomorrow looks tight with about ${loadPercent}% load. Moving one meeting or adding a buffer could create a clean break. I can suggest which one, if you’d like.`;
+  }
+  return `You have about ${capacityLeft} capacity points left. Moving one meeting could create a clean break. I can suggest which one, if you’d like.`;
 }
 
 function looksLikeCreateEvent(query) {
@@ -318,10 +389,10 @@ async function handleVoiceAction({ query, source, calendarId }) {
   };
 }
 
-async function buildVoiceResponseWithGemini(query, summary, events) {
+async function buildVoiceResponseWithGemini(query, summary, events, toneOverride) {
   if (!process.env.GCP_PROJECT_ID || !process.env.GCP_LOCATION) {
     return {
-      text: buildVoiceResponse(query, summary),
+      text: buildVoiceResponse(query, summary, toneOverride),
       warning: "Gemini is not configured. Set GCP_PROJECT_ID and GCP_LOCATION.",
     };
   }
@@ -340,6 +411,17 @@ async function buildVoiceResponseWithGemini(query, summary, events) {
     const summaryText = JSON.stringify(summary || {});
     const now = new Date();
     const normalizedQuery = query.toLowerCase();
+    const tone = getVoiceTone({
+      query: normalizedQuery,
+      summary: summary || {},
+      override: toneOverride,
+    });
+    const toneGuidance =
+      tone === "supportive"
+        ? "Tone: Supportive. Warm, reassuring, slower cadence, emotionally validating."
+        : tone === "practical"
+        ? "Tone: Practical. Calm, clear, slightly more direct, gentle and non-urgent."
+        : "Tone: Reflective. Calm, observational, non-directive, slightly slower pacing.";
     const wantsToday =
       normalizedQuery.includes("today") ||
       normalizedQuery.includes("current date") ||
@@ -388,12 +470,13 @@ async function buildVoiceResponseWithGemini(query, summary, events) {
       return [`title=${title}`, `start=${start}`, `end=${end}`].join(" | ");
     });
 
-    const prompt = `You are a calm, supportive calendar coach.
+    const prompt = `You are a calm calendar coach.
 Use the calendar summary and events to answer the user's question.
 If the data is insufficient, say what is missing.
 Always use the provided current date/time as the source of truth for "today".
 If the user asks about today, rely on the "Today's events" list.
 Keep the response concise (1-3 sentences).
+${toneGuidance}
 
 Current date/time: ${now.toISOString()} (local: ${now.toString()})
 Calendar summary JSON: ${summaryText}
@@ -424,7 +507,7 @@ User question: ${query}`;
         body: errorBody,
       });
       return {
-        text: buildVoiceResponse(query, summary),
+        text: buildVoiceResponse(query, summary, toneOverride),
         warning: debug
           ? `Gemini request failed (${response.status} ${response.statusText}). ${errorBody}`
           : "Gemini request failed. Check Vertex AI API and credentials.",
@@ -436,7 +519,7 @@ User question: ${query}`;
     const text = candidate?.content?.parts?.[0]?.text;
     if (!text) {
       return {
-        text: buildVoiceResponse(query, summary),
+        text: buildVoiceResponse(query, summary, toneOverride),
         warning: "Gemini returned no content. Check model and request format.",
       };
     }
@@ -451,7 +534,7 @@ User question: ${query}`;
   } catch (error) {
     console.error("Gemini voice response failed", error);
     return {
-      text: buildVoiceResponse(query, summary),
+      text: buildVoiceResponse(query, summary, toneOverride),
       warning: "Gemini error. Verify credentials and Vertex AI permissions.",
     };
   }

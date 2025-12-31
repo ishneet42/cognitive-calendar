@@ -64,6 +64,9 @@ export default function Home() {
   const [voiceError, setVoiceError] = useState("");
   const [voiceWarning, setVoiceWarning] = useState("");
   const [voiceStatus, setVoiceStatus] = useState<"idle" | "loading">("idle");
+  const [voiceTone, setVoiceTone] = useState<
+    "auto" | "reflective" | "supportive" | "practical"
+  >("auto");
   const [authStatus, setAuthStatus] = useState<
     "checking" | "unauthenticated" | "authenticated"
   >("checking");
@@ -73,7 +76,6 @@ export default function Home() {
   >([]);
   const [calendarId, setCalendarId] = useState<string>("primary");
   const [selectedDayIndex, setSelectedDayIndex] = useState<number>(0);
-  const [filter, setFilter] = useState<"all" | "events" | "meetings">("all");
   const [assistantActive, setAssistantActive] = useState(false);
   const [calendarTitle, setCalendarTitle] = useState<string>(formatMonthYear());
   const calendarRef = useRef<FullCalendar | null>(null);
@@ -154,13 +156,7 @@ export default function Home() {
   }, [events]);
 
   const calendarEvents = useMemo(() => {
-    const primary = events
-      .filter((event) => {
-        if (filter === "all") return true;
-        if (filter === "meetings") return event.classification.meeting_type !== "standup";
-        return event.classification.meeting_type === "standup";
-      })
-      .map((event) => ({
+    const primary = events.map((event) => ({
         id: event.id,
         title: event.title,
         start: event.start,
@@ -186,7 +182,7 @@ export default function Home() {
     });
 
     return [...primary, ...recovery];
-  }, [events, backToBackIds, filter]);
+  }, [events, backToBackIds]);
 
   const weeklyData = useMemo(() => {
     const base = WEEK_DAYS.map(() => 0.28);
@@ -209,15 +205,12 @@ export default function Home() {
       const dayEvents = events.filter(
         (event) => getWeekdayIndex(new Date(event.start)) === index
       );
-      const hasDecision = dayEvents.some(
-        (event) => event.classification.meeting_type === "decision"
-      );
       const hasContextSpike =
         dayEvents.length > 0 &&
         dayEvents.reduce((sum, event) => sum + event.contextSwitchCost, 0) /
           dayEvents.length >
           0.5;
-      return { hasDecision, hasContextSpike };
+      return { hasContextSpike };
     });
   }, [events]);
 
@@ -253,13 +246,19 @@ export default function Home() {
 
   const totalLoad = summary?.totalLoad ?? 0.32;
   const points = Math.round(totalLoad * 10 * 10) / 10;
-  const subtitle = totalLoad < 0.35 ? "Balanced" : totalLoad < 0.65 ? "You're carrying a lot today" : "Near capacity";
   const subtitleTone =
     totalLoad < 0.35
       ? "a balanced"
       : totalLoad < 0.65
       ? "a heavier"
       : "a near-capacity";
+  const calmCoachMessages = [
+    "Today asked a lot from you. You handled it.",
+    "Tomorrow looks decision-heavy. We can soften it.",
+    "You’re doing a lot of context switching today — that adds up.",
+  ];
+  const calmCoachMessage =
+    calmCoachMessages[new Date().getDay() % calmCoachMessages.length];
 
   const handleEventClick = (info: EventClickArg) => {
     const extended = info.event.extendedProps as EventLoad | undefined;
@@ -306,6 +305,7 @@ export default function Home() {
           events: voiceEvents,
           source: "google",
           calendarId,
+          tone: voiceTone,
         }),
       });
       const data = await response.json();
@@ -410,9 +410,8 @@ export default function Home() {
               <span className="text-xs uppercase tracking-[0.3em] text-slate-400">
                 Calm Coach
               </span>
-              <span className="text-sm text-slate-300">
-                Yesterday you protected two recovery buffers. Want to plan another?
-              </span>
+              <span className="text-xs text-slate-500">This is your secret weapon.</span>
+              <span className="text-sm text-slate-300">{calmCoachMessage}</span>
             </div>
             <div
               className="flex flex-1 items-center gap-3 rounded-full border border-white/10 bg-[#0b1220] px-4 py-2 text-sm text-slate-300 transition focus-within:shadow-[0_0_0_4px_rgba(56,189,248,0.25)]"
@@ -453,16 +452,23 @@ export default function Home() {
                 Cognitive Calendar
               </p>
               <h1 className="text-4xl font-semibold text-slate-100">
-                You don’t have time — you have capacity.
+                Not all meetings are equal. Your calendar should know that.
               </h1>
             </div>
             <span className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-300">
-              Meetings aren’t equal. Your calendar should know that.
+              Capacity-aware scheduling
             </span>
           </div>
           <p className="max-w-3xl text-sm text-slate-400">
-            Calm, capacity-first insight into mental load, context switching, and recovery — built
-            for sustainable focus.
+            You didn’t run out of time. You ran out of energy.
+            <span className="mt-2 block">
+              Some meetings drain you. Some sharpen you. Some leave no room to breathe.
+            </span>
+            <span className="mt-2 block">This calendar pays attention to that.</span>
+            <span className="mt-2 block">
+              A quiet way to understand how your day actually feels — and protect space for
+              recovery before you need it.
+            </span>
           </p>
           <div className="flex flex-wrap items-center gap-3 text-sm">
             <span className="rounded-full border border-emerald-300/40 bg-emerald-300/10 px-4 py-1.5 text-xs font-semibold uppercase tracking-[0.25em] text-emerald-100">
@@ -509,29 +515,6 @@ export default function Home() {
                 ▶
               </button>
             </div>
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 p-1">
-              {["all", "events", "meetings"].map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setFilter(tab as "all" | "events" | "meetings")}
-                  className={clsx(
-                    "rounded-full px-4 py-1 text-xs capitalize transition",
-                    filter === tab
-                      ? "bg-white text-slate-900"
-                      : "text-slate-400"
-                  )}
-                >
-                  {tab}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs text-slate-400">
-              <span>Search</span>
-              <input
-                className="bg-transparent text-xs text-slate-200 outline-none placeholder:text-slate-500"
-                placeholder="Find a meeting"
-              />
-            </div>
           </div>
           <div className="mt-6">
             <FullCalendar
@@ -574,10 +557,15 @@ export default function Home() {
                 <h3 className="text-2xl font-semibold text-slate-100">Cognitive Load</h3>
               </div>
               <div className="text-right">
-                <div className="text-4xl font-semibold text-slate-100">
-                  {points.toFixed(1)} pts
+                <div className="text-sm text-slate-200">
+                  Today feels full — but manageable.
                 </div>
-                <div className="text-sm text-slate-400">{subtitle}</div>
+                <div className="text-sm text-slate-400">
+                  You’re close to capacity. A little spacing will go a long way.
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  Capacity Index: {points.toFixed(1)} / 10
+                </div>
               </div>
             </div>
             <div className="mt-6 flex items-center gap-6">
@@ -603,7 +591,7 @@ export default function Home() {
           <div className="rounded-3xl border border-white/5 bg-[#0f172a]/60 p-6 shadow-[0_25px_60px_rgba(8,15,28,0.6)]">
             <h2 className="text-lg font-semibold text-slate-100">Cognitive Load Meter</h2>
             <p className="mt-1 text-sm text-slate-400">
-              A gentle snapshot of today&apos;s capacity, not a judgment.
+              This isn’t a score. It’s a moment-in-time check on how much you’re carrying today.
             </p>
             <div className="mt-6 flex items-center justify-center">
               <Gauge value={totalLoad} />
@@ -644,26 +632,27 @@ export default function Home() {
           <div className="rounded-3xl border border-white/5 bg-[#0f172a]/60 p-6 shadow-[0_25px_60px_rgba(8,15,28,0.6)]">
             <h2 className="text-lg font-semibold text-slate-100">Why is today heavy?</h2>
             <p className="mt-1 text-sm text-slate-400">
-              Contributions are shown as calm, relative weights — not raw formulas.
+              Here’s what’s quietly adding weight to today. Not formulas — just signals worth
+              noticing.
             </p>
             <div className="mt-6 space-y-4">
               <ContributionBar
-                label="Mental Load"
+                label="Mental effort (decision-heavy work)"
                 value={breakdown.mental}
                 onClick={() => focusByMetric("mental", selectedDayEvents, setSelectedEvent)}
               />
               <ContributionBar
-                label="Context Switching"
+                label="Context shifts (switching roles or topics)"
                 value={breakdown.context}
                 onClick={() => focusByMetric("context", selectedDayEvents, setSelectedEvent)}
               />
               <ContributionBar
-                label="Emotional Load"
+                label="Emotional weight (people, stakes, conversations)"
                 value={breakdown.emotional}
                 onClick={() => focusByMetric("emotional", selectedDayEvents, setSelectedEvent)}
               />
               <ContributionBar
-                label="Recovery Debt"
+                label="Recovery gaps (little time to reset)"
                 value={breakdown.recovery}
                 onClick={() => focusByMetric("recovery", selectedDayEvents, setSelectedEvent)}
               />
@@ -704,6 +693,23 @@ export default function Home() {
             <p className="mt-1 text-sm text-slate-400">
               Calm, supportive reflections on your day — ready for ElevenLabs.
             </p>
+            <div className="mt-4 flex items-center justify-between gap-3 text-xs text-slate-400">
+              <span>Voice tone</span>
+              <select
+                value={voiceTone}
+                onChange={(event) =>
+                  setVoiceTone(
+                    event.target.value as "auto" | "reflective" | "supportive" | "practical"
+                  )
+                }
+                className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200 outline-none"
+              >
+                <option value="auto">Auto</option>
+                <option value="reflective">Reflective</option>
+                <option value="supportive">Supportive</option>
+                <option value="practical">Practical</option>
+              </select>
+            </div>
             <div className="mt-4 flex items-center gap-3">
               <input
                 className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-200 outline-none focus:border-slate-400"
@@ -795,7 +801,7 @@ function WeeklyAreaChart({
   onSelect,
 }: {
   values: number[];
-  markers: { hasDecision: boolean; hasContextSpike: boolean }[];
+  markers: { hasContextSpike: boolean }[];
   selectedIndex: number;
   onSelect: (index: number) => void;
 }) {
@@ -830,9 +836,6 @@ function WeeklyAreaChart({
                 r={isSelected ? 2.8 : 2}
                 fill={isSelected ? "#f8fafc" : "#94a3b8"}
               />
-              {markers[index]?.hasDecision && (
-                <circle cx={x} cy={y - 6} r={2} fill="#fbbf24" />
-              )}
               {markers[index]?.hasContextSpike && (
                 <circle cx={x + 4} cy={y - 4} r={2} fill="#7dd3fc" />
               )}
